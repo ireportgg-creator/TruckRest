@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>화물차라운지 휴게소 찾기</title>
+<style>
+  :root { --bg:#fff; --fg:#1d2433; --muted:#6b7280; --line:#e5e7eb; --brand:#1b5fd6; --accent:#f59e0b; }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; font-family:-apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif; color:var(--fg); background:var(--bg); }
+  #app { display:flex; flex-direction:column; height:100%; }
+  header { padding:10px 12px; border-bottom:1px solid var(--line); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0 8px 0 0; }
+  button, select { font:inherit; font-size:14px; padding:7px 11px; border:1px solid var(--line); background:#fff; border-radius:8px; cursor:pointer; }
+  button.primary { background:var(--brand); color:#fff; border-color:var(--brand); }
+  button.on { background:#e8f0fe; border-color:var(--brand); color:var(--brand); }
+  #main { flex:1; display:flex; min-height:0; }
+  #map { flex:1; min-width:0; }
+  #side { width:340px; border-left:1px solid var(--line); overflow:auto; }
+  #status { padding:8px 12px; font-size:13px; color:var(--muted); border-bottom:1px solid var(--line); }
+  .item { padding:11px 12px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .item:hover, .item.sel { background:#f5f8ff; }
+  .item .t { font-weight:600; font-size:15px; }
+  .item .s { font-size:13px; color:var(--muted); margin-top:3px; }
+  .badge { display:inline-block; font-size:11px; padding:1px 6px; border-radius:99px; background:#fff4de; color:#a66300; margin-left:6px; }
+  .item a { color:var(--brand); font-size:13px; text-decoration:none; margin-right:10px; }
+  .iw { padding:8px 10px; font-size:13px; min-width:160px; }
+  @media (max-width:720px) {
+    #main { flex-direction:column; }
+    #side { width:100%; height:42%; border-left:0; border-top:1px solid var(--line); }
+    #map { height:58%; flex:none; }
+  }
+  dialog { border:0; border-radius:12px; max-width:440px; padding:20px; }
+  dialog input { width:100%; padding:9px; font-size:14px; margin:8px 0 12px; border:1px solid var(--line); border-radius:8px; }
+  dialog p { font-size:13px; color:var(--muted); line-height:1.5; margin:4px 0; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>🚛 화물차라운지 휴게소</h1>
+    <button id="btnLoc" class="primary">내 위치 기준 가까운 곳</button>
+    <select id="selRoute"><option value="">전체 노선</option></select>
+    <button id="btnTraffic">실시간 교통</button>
+    <button id="btnCsv">CSV 불러오기</button>
+    <button id="btnKey">API 키</button>
+    <input id="fileCsv" type="file" accept=".csv,text/csv" hidden>
+  </header>
+  <div id="main">
+    <div id="map"></div>
+    <div id="side">
+      <div id="status">준비 중…</div>
+      <div id="list"></div>
+    </div>
+  </div>
+</div>
+
+<dialog id="dlgKey">
+  <strong>카카오 JavaScript 키 입력</strong>
+  <p>developers.kakao.com → 내 애플리케이션 → 앱 키 → <b>JavaScript 키</b>를 붙여 넣어 주세요.</p>
+  <p>같은 앱의 [플랫폼 → Web]에 이 페이지를 여는 주소(예: http://localhost:8000)를 등록해야 지도가 표시됩니다.</p>
+  <input id="inpKey" placeholder="JavaScript 키">
+  <button id="saveKey" class="primary">저장하고 시작</button>
+</dialog>
+
+<script>
+/* ---------- 데이터 ----------
+   lounges.csv(노선,휴게소명,방향) 를 같은 폴더에 두면 자동으로 읽습니다.
+   공공데이터포털 '한국도로공사_휴게소 화물차 라운지 현황' 파일(15145196)을 내려받아
+   열 이름을 노선,휴게소명,방향 으로 맞추면 됩니다. 아래는 동작 확인용 예시 2건입니다. */
+const SAMPLE = [
+  { route:"경부선", name:"옥천휴게소", dir:"부산" },
+  { route:"영동선", name:"여주휴게소", dir:"강릉" },
+];
+
+let map, ps, trafficOn = false, myPos = null, myMarker = null;
+let stops = [];            // {route,name,dir,lat,lng,marker,dist}
+let infoWin = null;
+
+const $ = id => document.getElementById(id);
+const setStatus = t => $("status").textContent = t;
+
+/* ---------- 키 처리 / SDK 로드 ---------- */
+function getKey(){ try { return localStorage.getItem("kakaoKey") || ""; } catch(e){ return ""; } }
+function start(){
+  const key = getKey();
+  if (!key) { $("dlgKey").showModal(); return; }
+  const s = document.createElement("script");
+  s.src = `https://dapi.kakao.com/v2/maps/sdk.js?appkey=${encodeURIComponent(key)}&libraries=services&autoload=false`;
+  s.onload = () => kakao.maps.load(initMap);
+  s.onerror = () => setStatus("카카오 SDK를 불러오지 못했습니다. 키와 등록한 웹 도메인을 확인해 주세요.");
+  document.head.appendChild(s);
+}
+$("saveKey").onclick = () => {
+  const v = $("inpKey").value.trim(); if (!v) return;
+  try { localStorage.setItem("kakaoKey", v); } catch(e){}
+  location.reload();
+};
+$("btnKey").onclick = () => { $("inpKey").value = getKey(); $("dlgKey").showModal(); };
+
+/* ---------- 지도 ---------- */
+function initMap(){
+  map = new kakao.maps.Map($("map"), { center:new kakao.maps.LatLng(36.35, 127.9), level:12 });
+  map.addControl(new kakao.maps.ZoomControl(), kakao.maps.ControlPosition.RIGHT);
+  ps = new kakao.maps.services.Places();
+  infoWin = new kakao.maps.InfoWindow({ removable:true });
+  loadData();
+}
+
+$("btnTraffic").onclick = () => {
+  if (!map) return;
+  trafficOn = !trafficOn;
+  trafficOn ? map.addOverlayMapTypeId(kakao.maps.MapTypeId.TRAFFIC)
+            : map.removeOverlayMapTypeId(kakao.maps.MapTypeId.TRAFFIC);
+  $("btnTraffic").classList.toggle("on", trafficOn);
+};
+
+/* ---------- CSV ---------- */
+function parseCsv(text){
+  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).filter(l => l.trim());
+  if (!lines.length) return [];
+  const head = lines[0].split(",").map(s => s.trim());
+  const ix = k => head.findIndex(h => h.includes(k));
+  const iR = ix("노선"), iN = ix("휴게소"), iD = ix("방향");
+  return lines.slice(1).map(l => {
+    const c = l.split(",").map(s => s.trim());
+    return { route:c[iR]||"", name:c[iN]||"", dir:(c[iD]||"").replace(/방향$/,"") };
+  }).filter(r => r.name);
+}
+$("btnCsv").onclick = () => $("fileCsv").click();
+$("fileCsv").onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  buildStops(parseCsv(await f.text()));
+};
+
+async function loadData(){
+  let rows = null;
+  try {
+    const r = await fetch("lounges.csv", { cache:"no-store" });
+    if (r.ok) rows = parseCsv(await r.text());
+  } catch(e){}
+  if (!rows || !rows.length) {
+    rows = SAMPLE;
+    setStatus("lounges.csv 가 없어 예시 2건을 표시합니다. [CSV 불러오기]로 전체 목록을 넣어 주세요.");
+  }
+  buildStops(rows);
+}
+
+/* ---------- 지오코딩(카카오 장소검색, 결과는 브라우저에 저장) ---------- */
+function cacheGet(k){ try { return JSON.parse(localStorage.getItem("geo:"+k)); } catch(e){ return null; } }
+function cacheSet(k,v){ try { localStorage.setItem("geo:"+k, JSON.stringify(v)); } catch(e){} }
+
+function search(q){
+  return new Promise(res => ps.keywordSearch(q, (data, st) => {
+    if (st !== kakao.maps.services.Status.OK) return res(null);
+    const hit = data.find(d => d.place_name.includes("휴게소") || (d.category_name||"").includes("휴게소")) || null;
+    res(hit);
+  }));
+}
+async function geocode(r){
+  const key = `${r.route}|${r.name}|${r.dir}`;
+  const c = cacheGet(key); if (c) return c;
+  const base = r.name.replace(/\(.*?\)/g, "").trim();
+  const full = /휴게소$/.test(base) ? base : base + "휴게소";
+  const tries = [];
+  if (r.dir) tries.push(`${full} ${r.dir}방향`, `${full}(${r.dir})`);
+  tries.push(`${r.route} ${full}`, full);
+  for (const q of tries) {
+    const h = await search(q);
+    if (h) { const v = { lat:+h.y, lng:+h.x, addr:h.road_address_name || h.address_name }; cacheSet(key, v); return v; }
+  }
+  return null;
+}
+
+async function buildStops(rows){
+  stops.forEach(s => s.marker && s.marker.setMap(null));
+  stops = [];
+  const routes = [...new Set(rows.map(r => r.route).filter(Boolean))].sort();
+  $("selRoute").innerHTML = `<option value="">전체 노선</option>` + routes.map(r => `<option>${r}</option>`).join("");
+  let fail = 0;
+  for (let i = 0; i < rows.length; i++) {
+    setStatus(`위치 확인 중… ${i+1}/${rows.length}`);
+    const g = await geocode(rows[i]);
+    if (!g) { fail++; continue; }
+    const s = { ...rows[i], ...g };
+    s.marker = new kakao.maps.Marker({ position:new kakao.maps.LatLng(s.lat, s.lng), title:s.name });
+    kakao.maps.event.addListener(s.marker, "click", () => select(s));
+    stops.push(s);
+    if (i % 10 === 0) render();
+    await new Promise(r => setTimeout(r, 60));
+  }
+  render();
+  setStatus(`화물차라운지 휴게소 ${stops.length}곳` + (fail ? ` (위치 못 찾은 ${fail}곳 제외)` : "") + (myPos ? " · 가까운 순" : ""));
+}
+
+/* ---------- 거리 / 목록 ---------- */
+function hav(a,b,c,d){
+  const R=6371, t=x=>x*Math.PI/180, dLat=t(c-a), dLng=t(d-b);
+  const h=Math.sin(dLat/2)**2+Math.cos(t(a))*Math.cos(t(c))*Math.sin(dLng/2)**2;
+  return 2*R*Math.asin(Math.sqrt(h));
+}
+function render(){
+  const f = $("selRoute").value;
+  let arr = stops.filter(s => !f || s.route === f);
+  if (myPos) { arr.forEach(s => s.dist = hav(myPos.lat, myPos.lng, s.lat, s.lng)); arr.sort((a,b) => a.dist - b.dist); }
+  stops.forEach(s => s.marker.setMap(arr.includes(s) ? map : null));
+  $("list").innerHTML = "";
+  arr.forEach(s => {
+    const d = document.createElement("div"); d.className = "item"; d.dataset.k = s.name+s.dir;
+    d.innerHTML = `<div class="t">${s.name}<span class="badge">화물차라운지</span></div>
+      <div class="s">${s.route}${s.dir ? " · " + s.dir + "방향" : ""}${s.dist!=null ? " · " + s.dist.toFixed(1) + "km" : ""}</div>
+      <div class="s">${s.addr||""}</div>
+      <div class="s" style="margin-top:6px"><a href="https://map.kakao.com/link/to/${encodeURIComponent(s.name)},${s.lat},${s.lng}" target="_blank" rel="noopener">길찾기</a></div>`;
+    d.onclick = e => { if (e.target.tagName !== "A") select(s); };
+    $("list").appendChild(d);
+  });
+  if (arr.length && !myPos && map) fit(arr);
+}
+function fit(arr){
+  const b = new kakao.maps.LatLngBounds();
+  arr.forEach(s => b.extend(new kakao.maps.LatLng(s.lat, s.lng)));
+  if (myPos) b.extend(new kakao.maps.LatLng(myPos.lat, myPos.lng));
+  map.setBounds(b);
+}
+function select(s){
+  const p = new kakao.maps.LatLng(s.lat, s.lng);
+  map.panTo(p);
+  infoWin.setContent(`<div class="iw"><b>${s.name}</b><br>${s.route}${s.dir ? " · "+s.dir+"방향" : ""}${s.dist!=null ? "<br>"+s.dist.toFixed(1)+"km" : ""}</div>`);
+  infoWin.open(map, s.marker);
+  document.querySelectorAll(".item").forEach(e => e.classList.toggle("sel", e.dataset.k === s.name+s.dir));
+}
+$("selRoute").onchange = render;
+
+/* ---------- 내 위치 ---------- */
+$("btnLoc").onclick = () => {
+  if (!map) return;
+  if (!navigator.geolocation) return setStatus("이 브라우저는 위치 기능을 지원하지 않습니다.");
+  setStatus("내 위치 확인 중…");
+  navigator.geolocation.getCurrentPosition(pos => {
+    myPos = { lat:pos.coords.latitude, lng:pos.coords.longitude };
+    const ll = new kakao.maps.LatLng(myPos.lat, myPos.lng);
+    if (myMarker) myMarker.setMap(null);
+    myMarker = new kakao.maps.CustomOverlay({ position:ll, yAnchor:0.5,
+      content:'<div style="width:16px;height:16px;border-radius:50%;background:#1b5fd6;border:3px solid #fff;box-shadow:0 0 0 2px #1b5fd6"></div>' });
+    myMarker.setMap(map);
+    render();
+    const first = $("list").firstElementChild;
+    const near = stops.filter(s => s.dist != null && (!$("selRoute").value || s.route === $("selRoute").value)).sort((a,b)=>a.dist-b.dist)[0];
+    if (near) { fit([near]); select(near); setStatus(`가장 가까운 곳: ${near.name} (${near.dist.toFixed(1)}km, 직선거리)`); }
+    else setStatus("표시할 휴게소가 없습니다.");
+  }, err => setStatus("위치 권한이 필요합니다. 브라우저 설정에서 허용해 주세요."), { enableHighAccuracy:true, timeout:10000 });
+};
+
+start();
+</script>
+</body>
+</html>
