@@ -170,7 +170,17 @@ function initMap(){
   mineIcon = new kakao.maps.MarkerImage("data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg),
     new kakao.maps.Size(34, 42), { offset:new kakao.maps.Point(17, 42) });
   loadMine();
+  locateOnStart();
   loadData();
+}
+/* 앱을 열면 자동으로 내 위치를 표시하고 그 주변으로 지도를 옮깁니다 */
+async function locateOnStart(){
+  try { myPos = await getPos(); }
+  catch(e){ return; }   // 권한이 없으면 전체 보기로 둡니다
+  showMe();
+  map.setCenter(new kakao.maps.LatLng(myPos.lat, myPos.lng));
+  map.setLevel(7);
+  render();
 }
 $("btnTraffic").onclick = () => {
   if (!map) return;
